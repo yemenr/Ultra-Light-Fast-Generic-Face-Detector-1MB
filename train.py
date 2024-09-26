@@ -28,13 +28,12 @@ parser.add_argument('--validation_dataset', help='Dataset directory path')
 parser.add_argument('--balance_data', action='store_true',
                     help="Balance training data by down-sampling more frequent labels.")
 
-parser.add_argument('--net', default="mb_tiny_RFB_fd",
-                    help="The network architecture ,optional(mb_tiny_RFB_fd , mb_tiny_fd)")
+parser.add_argument('--net', default="RFB",
+                    help="The network architecture ,optional(RFB , slim)")
 parser.add_argument('--freeze_base_net', action='store_true',
                     help="Freeze base net layers.")
 parser.add_argument('--freeze_net', action='store_true',
                     help="Freeze all the layers except the prediction head.")
-
 
 # Params for SGD
 parser.add_argument('--lr', '--learning-rate', default=1e-2, type=float,
@@ -88,13 +87,11 @@ parser.add_argument('--checkpoint_folder', default='models/',
 parser.add_argument('--log_dir', default='./models/Ultra-Light(1MB)_&_Fast_Face_Detector/logs',
                     help='lod dir')
 parser.add_argument('--cuda_index', default="0", type=str,
-                    help='choose cuda index')
+                    help='Choose cuda index.If you have 4 GPUs, you can set it like 0,1,2,3')
 parser.add_argument('--power', default=2, type=int,
                     help='poly lr pow')
-parser.add_argument('--overlap_threshold', default=0.34999999404, type=float,
+parser.add_argument('--overlap_threshold', default=0.35, type=float,
                     help='overlap_threshold')
-parser.add_argument('--iou_threshold', default=0.34999999404, type=float,
-                    help='iou_threshold')
 parser.add_argument('--optimizer_type', default="SGD", type=str,
                     help='optimizer_type')
 parser.add_argument('--input_size', default=320, type=int,
@@ -198,10 +195,10 @@ if __name__ == '__main__':
     timer = Timer()
 
     logging.info(args)
-    if args.net == 'mb_tiny_fd':
+    if args.net == 'slim':
         create_net = create_mb_tiny_fd
         config = fd_config
-    elif args.net == 'mb_tiny_RFB_fd':
+    elif args.net == 'RFB':
         create_net = create_Mb_Tiny_RFB_fd
         config = fd_config
     else:
@@ -249,6 +246,7 @@ if __name__ == '__main__':
     net = create_net(num_classes)
 
     # add multigpu_train
+    cuda_index_list = None
     if torch.cuda.device_count() >= 1:
         cuda_index_list = [int(v.strip()) for v in args.cuda_index.split(",")]
         net = nn.DataParallel(net, device_ids=cuda_index_list)
@@ -281,17 +279,30 @@ if __name__ == '__main__':
         params = itertools.chain(net.regression_headers.parameters(), net.classification_headers.parameters())
         logging.info("Freeze all the layers except prediction heads.")
     else:
-        params = [
-            {'params': net.module.base_net.parameters(), 'lr': base_net_lr},
-            {'params': itertools.chain(
-                net.module.source_layer_add_ons.parameters(),
-                net.module.extras.parameters()
-            ), 'lr': extra_layers_lr},
-            {'params': itertools.chain(
-                net.module.regression_headers.parameters(),
-                net.module.classification_headers.parameters()
-            )}
-        ]
+        if cuda_index_list:
+            params = [
+                {'params': net.module.base_net.parameters(), 'lr': base_net_lr},
+                {'params': itertools.chain(
+                    net.module.source_layer_add_ons.parameters(),
+                    net.module.extras.parameters()
+                ), 'lr': extra_layers_lr},
+                {'params': itertools.chain(
+                    net.module.regression_headers.parameters(),
+                    net.module.classification_headers.parameters()
+                )}
+            ]
+        else:
+            params = [
+                {'params': net.base_net.parameters(), 'lr': base_net_lr},
+                {'params': itertools.chain(
+                    net.source_layer_add_ons.parameters(),
+                    net.extras.parameters()
+                ), 'lr': extra_layers_lr},
+                {'params': itertools.chain(
+                    net.regression_headers.parameters(),
+                    net.classification_headers.parameters()
+                )}
+            ]
 
     timer.start("Load Model")
     if args.resume:
@@ -307,7 +318,7 @@ if __name__ == '__main__':
 
     net.to(DEVICE)
 
-    criterion = MultiboxLoss(config.priors, iou_threshold=args.iou_threshold, neg_pos_ratio=3,
+    criterion = MultiboxLoss(config.priors, neg_pos_ratio=3,
                              center_variance=0.1, size_variance=0.2, device=DEVICE)
     if args.optimizer_type == "SGD":
         optimizer = torch.optim.SGD(params, lr=args.lr, momentum=args.momentum,
@@ -359,5 +370,8 @@ if __name__ == '__main__':
                 f"Validation Classification Loss: {val_classification_loss:.4f}"
             )
             model_path = os.path.join(args.checkpoint_folder, f"{args.net}-Epoch-{epoch}-Loss-{val_loss}.pth")
-            net.module.save(model_path)
+            if cuda_index_list:
+                net.module.save(model_path)
+            else:
+                net.save(model_path)
             logging.info(f"Saved model {model_path}")
